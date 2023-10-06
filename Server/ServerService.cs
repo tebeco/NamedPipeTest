@@ -11,47 +11,33 @@ public sealed class ServerService : BackgroundService
         _logger = logger;
     }
 
-    public async Task Start()
+    public void Stop()
     {
-        await Task.Run(new Action(async () =>
-        {
-            PipeServer server = new("NamedPipeTest", _logger);
-            server.DataReceived += (sender, args) =>
-            {
-                _logger.LogInformation("Received - Title: {Title}, Message: {Message}", args.Title, args.Message);
-            };
-
-            _ = server.Start();
-
-            Thread thread = new(() =>
-            {
-                while (true)
-                {
-                    _ = server.Send("Title2", "Message2");
-                    Thread.Sleep(1000);
-                }
-            })
-            {
-                IsBackground = true
-            };
-
-            //thread.Start();
-        }));
-    }
-
-    public async Task Stop()
-    {
-        await Task.Run(new Action(() =>
-        {
-            _logger.LogInformation("Closing server pipe.");
-        }));
+        _logger.LogInformation("Closing server pipe.");
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         try
         {
-            await Start();
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                PipeServer server = new("NamedPipeTest", _logger);
+                server.DataReceived += (sender, args) => _logger.LogInformation("Received - Title: {Title}, Message: {Message}", args.Title, args.Message);
+
+                var runningTask = server.RunAsync(stoppingToken);
+
+                var sendingTask = Task.Run(async () =>
+                {
+                    while (!stoppingToken.IsCancellationRequested)
+                    {
+                        await server.SendAsync("Title2", "Message2", stoppingToken);
+                        await Task.Delay(1000, stoppingToken);
+                    }
+                });
+
+                await Task.WhenAll(runningTask, sendingTask);
+            };
         }
         catch (Exception ex)
         {
@@ -67,20 +53,5 @@ public sealed class ServerService : BackgroundService
             // recovery options, we need to terminate the process with a non-zero exit code.
             Environment.Exit(1);
         }
-    }
-
-    private void RunBackgroundThread(ThreadStart start, string thname, ThreadPriority tp)
-    {
-        _logger.LogInformation("{thname} > Starting background thread!", thname);
-        Thread background = new(start)
-        {
-            IsBackground = true,
-            Name = thname,
-            Priority = tp
-        };
-
-        background.Start();
-
-        _logger.LogInformation("{thname} > Started background thread!", thname);
     }
 }

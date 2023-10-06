@@ -11,9 +11,14 @@ public sealed class ClientService : BackgroundService
         _logger = logger;
     }
 
-    public async Task Start()
+    public void Stop()
     {
-        await Task.Run(new Action(async () =>
+        _logger.LogInformation("Closing server pipe.");
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        try
         {
             PipeClient client = new("NamedPipeTest", _logger);
             client.DataReceived += (sender, args) =>
@@ -21,37 +26,19 @@ public sealed class ClientService : BackgroundService
                 _logger.LogInformation("Received - Title: {Title}, Message: {Message}", args.Title, args.Message);
             };
 
-            _ = client.Start();
-            Thread thread = new(async () =>
+            var clientTask = client.StartAsync(stoppingToken);
+
+            var sendingTask = Task.Run(async () =>
             {
                 int count = 0;
                 while (true)
                 {
-                    await client.Send("Title1", $"Message > {count}{Environment.NewLine}");
+                    await client.SendAsync("Title1", $"Message > {count}{Environment.NewLine}", stoppingToken);
                     count++;
                 }
-            })
-            {
-                IsBackground = true
-            };
+            });
 
-            thread.Start();
-        }));
-    }
-
-    public async Task Stop()
-    {
-        await Task.Run(new Action(() =>
-        {
-            _logger.LogInformation("Closing server pipe.");
-        }));
-    }
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        try
-        {
-            await Start();
+            await Task.WhenAll(clientTask, sendingTask);
         }
         catch (Exception ex)
         {
@@ -67,20 +54,5 @@ public sealed class ClientService : BackgroundService
             // recovery options, we need to terminate the process with a non-zero exit code.
             Environment.Exit(1);
         }
-    }
-
-    private void RunBackgroundThread(ThreadStart start, string thname, ThreadPriority tp)
-    {
-        _logger.LogInformation("{thname} > Starting background thread!", thname);
-        Thread background = new(start)
-        {
-            IsBackground = true,
-            Name = thname,
-            Priority = tp
-        };
-
-        background.Start();
-
-        _logger.LogInformation("{thname} > Started background thread!", thname);
     }
 }

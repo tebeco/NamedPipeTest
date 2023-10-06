@@ -7,129 +7,85 @@ namespace Server.IPC;
 
 public class PipeServer
 {
+    public event EventHandler<DataEventArgs>? DataReceived;
+
     private static readonly Encoding _encoding = Encoding.UTF8;
-    private static ReadOnlySpan<byte> NewLine => _encoding.GetBytes(Environment.NewLine);
+    private readonly static byte[] NewLine = Encoding.UTF8.GetBytes(Environment.NewLine);
 
-    private NamedPipeServerStream _pipeServer;
-    private PipeReader _pipeReader;
-    private PipeWriter _pipeWriter;
-
-    private readonly string _pipeName;
-
-    private Task readTask;
-    private bool threadRunning = false;
-    private CancellationTokenSource _cts = new();
-
+    private readonly NamedPipeServerStream _pipeServer;
     private readonly ILogger<ServerService> _logger;
 
-    public event EventHandler<DataEventArgs> DataReceived;
 
     public PipeServer(string pipeName, ILogger<ServerService> logger)
     {
         _logger = logger;
-        _pipeName = pipeName;
-
-        _pipeServer = new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 4, PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+        _pipeServer = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 4, PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
 
         _logger.LogInformation("Pipe Name: {pipeName}", pipeName);
     }
 
-    public async Task Start()
+
+    public async Task RunAsync(CancellationToken ct)
     {
-        _cts = new CancellationTokenSource();
+        _logger.LogInformation("Waiting for connecction...");
+        await _pipeServer.WaitForConnectionAsync(ct);
+        _logger.LogInformation("Connected...");
 
-        await Task.Run(async () =>
-        {
-            do
-            {
-                if (!threadRunning)
-                {
-                    if (_pipeServer.IsConnected)
-                    {
-                        await Task.Run(async () =>
-                        {
-                            readTask = Task.Run(async () => { await ReadData(); });
-
-                            await readTask;
-                        });
-                    }
-                    else
-                    {
-                        _pipeServer.Dispose();
-                        _pipeServer = new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 4, PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
-
-                        _logger.LogInformation("Waiting for connecction...");
-                        await _pipeServer.WaitForConnectionAsync(_cts.Token);
-                        _logger.LogInformation("Connected...");
-                    }
-                }
-            } while (!_cts.IsCancellationRequested);
-        });
+        _ = ReadData(ct);
     }
 
     public void Stop()
     {
-        _cts.Cancel();
         _pipeServer.Close();
     }
 
     private async Task ReadData(CancellationToken ct = default)
     {
-        threadRunning = true;
-        _pipeReader = PipeReader.Create(_pipeServer, new StreamPipeReaderOptions(leaveOpen: true));
+        var pipeReader = PipeReader.Create(_pipeServer, new StreamPipeReaderOptions(leaveOpen: true));
 
         try
         {
-            while (true)
+            while (_pipeServer.IsConnected)
             {
-                if (_pipeServer.IsConnected)
+                ReadResult readResult = await pipeReader.ReadAsync(ct);
+                ReadOnlySequence<byte> buffer = readResult.Buffer;
+
+                try
                 {
-                    ReadResult readResult = await _pipeReader.ReadAsync(ct);
-                    ReadOnlySequence<byte> buffer = readResult.Buffer;
-
-                    try
+                    if (readResult.IsCanceled)
                     {
-                        if (readResult.IsCanceled)
-                        {
-                            break;
-                        }
-
-                        while (TryParseLine(ref buffer, out ReadOnlySequence<byte> line))
-                        {
-                            DataReceived?.Invoke(this, new DataEventArgs(_encoding.GetString(line)));
-                        }
-
-                        if (readResult.IsCompleted)
-                        {
-                            if (!buffer.IsEmpty)
-                            {
-                                _logger.LogError("Incomplete pipe read");
-                            }
-
-                            break;
-                        }
+                        break;
                     }
-                    finally
+
+                    while (TryParseLine(ref buffer, out ReadOnlySequence<byte> line))
                     {
-                        _pipeReader.AdvanceTo(buffer.Start, buffer.End);
+                        DataReceived?.Invoke(this, new DataEventArgs(_encoding.GetString(line)));
+                    }
+
+                    if (readResult.IsCompleted)
+                    {
+                        if (!buffer.IsEmpty)
+                        {
+                            _logger.LogError("Incomplete pipe read");
+                        }
+
+                        break;
                     }
                 }
-                else
+                finally
                 {
-                    break;
+                    pipeReader.AdvanceTo(buffer.Start, buffer.End);
                 }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError("Exception occured when reading from pipe", ex);
+            _logger.LogError(ex, "Exception occured when reading from pipe");
         }
         finally
         {
-            await _pipeReader.CompleteAsync();
+            await pipeReader.CompleteAsync();
         }
-
-        threadRunning = false;
     }
 
     private static bool TryParseLine(ref ReadOnlySequence<byte> buffer, out ReadOnlySequence<byte> message)
@@ -147,20 +103,20 @@ public class PipeServer
         return false;
     }
 
-    public async Task Send(string title, string message)
+    public async Task SendAsync(string title, string message, CancellationToken ct)
     {
-        _pipeWriter = PipeWriter.Create(_pipeServer, new StreamPipeWriterOptions(leaveOpen: true));
+        var pipeWriter = PipeWriter.Create(_pipeServer, new StreamPipeWriterOptions(leaveOpen: true));
 
         try
         {
             if (_pipeServer.IsConnected)
             {
-                await _pipeWriter.WriteAsync(_encoding.GetBytes(title + "," + message));
+                await pipeWriter.WriteAsync(_encoding.GetBytes(title + "," + message), ct);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError("Exception occured when writing to the pipe", ex);
+            _logger.LogError(ex, "Exception occured when writing to the pipe");
         }
     }
 }
